@@ -28,6 +28,20 @@ IMAGE_SIZE = 224
 
 
 # ============================================================
+# Image preprocessing
+# ============================================================
+
+transform = transforms.Compose([
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+])
+
+
+# ============================================================
 # Grad-CAM implementation
 # ============================================================
 
@@ -67,17 +81,14 @@ class GradCAM:
 
         score.backward()
 
-        # Get gradients and activations
         gradients = self.gradients
         activations = self.activations
 
-        # Global average pooling of gradients
         weights = gradients.mean(
             dim=(2, 3),
             keepdim=True
         )
 
-        # Weighted combination
         cam = (weights * activations).sum(
             dim=1,
             keepdim=True
@@ -85,10 +96,8 @@ class GradCAM:
 
         cam = torch.relu(cam)
 
-        # Remove batch/channel dimensions
         cam = cam.squeeze().cpu().numpy()
 
-        # Normalize
         cam -= cam.min()
 
         if cam.max() > 0:
@@ -100,20 +109,6 @@ class GradCAM:
 
         self.forward_hook.remove()
         self.backward_hook.remove()
-
-
-# ============================================================
-# Image preprocessing
-# ============================================================
-
-transform = transforms.Compose([
-    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
-])
 
 
 # ============================================================
@@ -136,6 +131,7 @@ model.load_state_dict(
 )
 
 model = model.to(device)
+
 model.eval()
 
 print("Model loaded successfully.")
@@ -155,51 +151,60 @@ gradcam = GradCAM(
 
 
 # ============================================================
-# Select an image
+# Generate Grad-CAM for an image
 # ============================================================
 
-# We'll automatically select the first APTOS image.
-# Later the frontend will provide the image dynamically.
+def generate_gradcam(image_path):
 
-image_dir = "data/raw/aptos/train_images"
+    """
+    Generate prediction and Grad-CAM visualization
+    for a dynamically supplied image.
 
-image_files = [
-    f for f in os.listdir(image_dir)
-    if f.lower().endswith((".png", ".jpg", ".jpeg"))
-]
+    Parameters
+    ----------
+    image_path : str
+        Path to the input retinal image.
 
-if len(image_files) == 0:
+    Returns
+    -------
+    prediction : str
+        Predicted diabetic retinopathy class.
 
-    raise FileNotFoundError(
-        "No images found in data/raw/aptos/train_images"
-    )
+    confidence : float
+        Prediction confidence.
 
-image_path = os.path.join(
-    image_dir,
-    image_files[0]
-)
+    original : numpy.ndarray
+        Original image in RGB format.
 
-print("Using image:", image_path)
+    heatmap : numpy.ndarray
+        Grad-CAM heatmap in RGB format.
 
+    overlay : numpy.ndarray
+        Heatmap overlaid on the original image.
+    """
 
-# ============================================================
-# Load image
-# ============================================================
+    # --------------------------------------------------------
+    # Load image
+    # --------------------------------------------------------
 
-original_image = Image.open(
-    image_path
-).convert("RGB")
+    original_image = Image.open(
+        image_path
+    ).convert("RGB")
 
-input_tensor = transform(
-    original_image
-).unsqueeze(0).to(device)
+    # --------------------------------------------------------
+    # Preprocess
+    # --------------------------------------------------------
 
+    input_tensor = transform(
+        original_image
+    ).unsqueeze(0).to(device)
 
-# ============================================================
-# Prediction
-# ============================================================
+    # --------------------------------------------------------
+    # Prediction
+    # --------------------------------------------------------
 
-with torch.no_grad():
+    # Grad-CAM requires gradients, so do NOT use torch.no_grad()
+    # around this prediction.
 
     output = model(input_tensor)
 
@@ -213,105 +218,89 @@ with torch.no_grad():
         dim=1
     ).item()
 
-confidence = probabilities[
-    0,
-    predicted_class
-].item()
+    confidence = probabilities[
+        0,
+        predicted_class
+    ].item()
 
-print(
-    f"Prediction: {CLASS_NAMES[predicted_class]}"
-)
+    prediction = CLASS_NAMES[
+        predicted_class
+    ]
 
-print(
-    f"Confidence: {confidence * 100:.2f}%"
-)
+    # --------------------------------------------------------
+    # Generate Grad-CAM
+    # --------------------------------------------------------
 
+    cam = gradcam.generate(
+        input_tensor,
+        predicted_class
+    )
 
-# ============================================================
-# Generate Grad-CAM
-# ============================================================
+    # --------------------------------------------------------
+    # Prepare original image
+    # --------------------------------------------------------
 
-cam = gradcam.generate(
-    input_tensor,
-    predicted_class
-)
+    original = np.array(
+        original_image
+    )
 
+    # OpenCV uses BGR
+    original_bgr = cv2.cvtColor(
+        original,
+        cv2.COLOR_RGB2BGR
+    )
 
-# ============================================================
-# Prepare images
-# ============================================================
+    height, width = original_bgr.shape[:2]
 
-original = np.array(
-    original_image
-)
+    # --------------------------------------------------------
+    # Resize CAM
+    # --------------------------------------------------------
 
-original = cv2.cvtColor(
-    original,
-    cv2.COLOR_RGB2BGR
-)
+    cam_resized = cv2.resize(
+        cam,
+        (width, height)
+    )
 
-height, width = original.shape[:2]
+    heatmap = np.uint8(
+        255 * cam_resized
+    )
 
-cam_resized = cv2.resize(
-    cam,
-    (width, height)
-)
+    heatmap = cv2.applyColorMap(
+        heatmap,
+        cv2.COLORMAP_JET
+    )
 
-heatmap = np.uint8(
-    255 * cam_resized
-)
+    # --------------------------------------------------------
+    # Overlay
+    # --------------------------------------------------------
 
-heatmap = cv2.applyColorMap(
-    heatmap,
-    cv2.COLORMAP_JET
-)
+    overlay = cv2.addWeighted(
+        original_bgr,
+        0.6,
+        heatmap,
+        0.4,
+        0
+    )
 
-overlay = cv2.addWeighted(
-    original,
-    0.6,
-    heatmap,
-    0.4,
-    0
-)
+    # Convert OpenCV BGR → RGB
+    heatmap_rgb = cv2.cvtColor(
+        heatmap,
+        cv2.COLOR_BGR2RGB
+    )
 
+    overlay_rgb = cv2.cvtColor(
+        overlay,
+        cv2.COLOR_BGR2RGB
+    )
 
-# ============================================================
-# Save outputs
-# ============================================================
+    # --------------------------------------------------------
+    # Return results
+    # --------------------------------------------------------
 
-os.makedirs(
-    OUTPUT_DIR,
-    exist_ok=True
-)
-
-cv2.imwrite(
-    f"{OUTPUT_DIR}/original.png",
-    original
-)
-
-cv2.imwrite(
-    f"{OUTPUT_DIR}/heatmap.png",
-    heatmap
-)
-
-cv2.imwrite(
-    f"{OUTPUT_DIR}/overlay.png",
-    overlay
-)
-
-
-print("\nGrad-CAM generated successfully!")
-
-print(
-    f"Original: {OUTPUT_DIR}/original.png"
-)
-
-print(
-    f"Heatmap: {OUTPUT_DIR}/heatmap.png"
-)
-
-print(
-    f"Overlay: {OUTPUT_DIR}/overlay.png"
-)
-
-gradcam.remove_hooks()
+    return (
+        prediction,
+        confidence,
+        original,
+        heatmap_rgb,
+        overlay_rgb
+    )
