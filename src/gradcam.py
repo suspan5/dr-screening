@@ -14,8 +14,6 @@ from src.model import create_model, get_device
 
 CHECKPOINT_PATH = "checkpoints/best_model.pth"
 
-OUTPUT_DIR = "outputs/gradcam"
-
 CLASS_NAMES = [
     "No DR",
     "Mild",
@@ -25,20 +23,6 @@ CLASS_NAMES = [
 ]
 
 IMAGE_SIZE = 224
-
-
-# ============================================================
-# Image preprocessing
-# ============================================================
-
-transform = transforms.Compose([
-    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
-])
 
 
 # ============================================================
@@ -64,11 +48,9 @@ class GradCAM:
         )
 
     def save_activation(self, module, input, output):
-
         self.activations = output.detach()
 
     def save_gradient(self, module, grad_input, grad_output):
-
         self.gradients = grad_output[0].detach()
 
     def generate(self, image_tensor, class_index):
@@ -112,195 +94,179 @@ class GradCAM:
 
 
 # ============================================================
+# Image preprocessing
+# ============================================================
+
+transform = transforms.Compose([
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+])
+
+
+# ============================================================
 # Load model
 # ============================================================
 
-device = get_device()
+def load_model():
 
-print("Device:", device)
+    device = get_device()
 
-model = create_model()
+    print("Device:", device)
 
-checkpoint = torch.load(
-    CHECKPOINT_PATH,
-    map_location=device
-)
+    model = create_model()
 
-model.load_state_dict(
-    checkpoint["model_state_dict"]
-)
+    checkpoint = torch.load(
+        CHECKPOINT_PATH,
+        map_location=device
+    )
 
-model = model.to(device)
+    model.load_state_dict(
+        checkpoint["model_state_dict"]
+    )
 
-model.eval()
+    model = model.to(device)
+    model.eval()
 
-print("Model loaded successfully.")
-
-
-# ============================================================
-# Target layer
-# ============================================================
-
-# Last convolutional feature layer of MobileNetV2
-target_layer = model.features[-1]
-
-gradcam = GradCAM(
-    model,
-    target_layer
-)
+    return model, device
 
 
 # ============================================================
-# Generate Grad-CAM for an image
+# Generate Grad-CAM for a given image
 # ============================================================
 
 def generate_gradcam(image_path):
 
-    """
-    Generate prediction and Grad-CAM visualization
-    for a dynamically supplied image.
-
-    Parameters
-    ----------
-    image_path : str
-        Path to the input retinal image.
-
-    Returns
-    -------
-    prediction : str
-        Predicted diabetic retinopathy class.
-
-    confidence : float
-        Prediction confidence.
-
-    original : numpy.ndarray
-        Original image in RGB format.
-
-    heatmap : numpy.ndarray
-        Grad-CAM heatmap in RGB format.
-
-    overlay : numpy.ndarray
-        Heatmap overlaid on the original image.
-    """
-
     # --------------------------------------------------------
-    # Load image
+    # Load model
     # --------------------------------------------------------
 
-    original_image = Image.open(
-        image_path
-    ).convert("RGB")
+    model, device = load_model()
 
     # --------------------------------------------------------
-    # Preprocess
+    # Target layer
     # --------------------------------------------------------
 
-    input_tensor = transform(
-        original_image
-    ).unsqueeze(0).to(device)
+    target_layer = model.features[-1]
 
-    # --------------------------------------------------------
-    # Prediction
-    # --------------------------------------------------------
-
-    # Grad-CAM requires gradients, so do NOT use torch.no_grad()
-    # around this prediction.
-
-    output = model(input_tensor)
-
-    probabilities = torch.softmax(
-        output,
-        dim=1
+    gradcam = GradCAM(
+        model,
+        target_layer
     )
 
-    predicted_class = torch.argmax(
-        probabilities,
-        dim=1
-    ).item()
+    try:
 
-    confidence = probabilities[
-        0,
-        predicted_class
-    ].item()
+        # ----------------------------------------------------
+        # Load image
+        # ----------------------------------------------------
 
-    prediction = CLASS_NAMES[
-        predicted_class
-    ]
+        original_image = Image.open(
+            image_path
+        ).convert("RGB")
 
-    # --------------------------------------------------------
-    # Generate Grad-CAM
-    # --------------------------------------------------------
+        input_tensor = transform(
+            original_image
+        ).unsqueeze(0).to(device)
 
-    cam = gradcam.generate(
-        input_tensor,
-        predicted_class
-    )
+        # ----------------------------------------------------
+        # Prediction
+        # ----------------------------------------------------
 
-    # --------------------------------------------------------
-    # Prepare original image
-    # --------------------------------------------------------
+        output = model(input_tensor)
 
-    original = np.array(
-        original_image
-    )
+        probabilities = torch.softmax(
+            output,
+            dim=1
+        )
 
-    # OpenCV uses BGR
-    original_bgr = cv2.cvtColor(
-        original,
-        cv2.COLOR_RGB2BGR
-    )
+        predicted_class = torch.argmax(
+            probabilities,
+            dim=1
+        ).item()
 
-    height, width = original_bgr.shape[:2]
+        confidence = probabilities[
+            0,
+            predicted_class
+        ].item()
 
-    # --------------------------------------------------------
-    # Resize CAM
-    # --------------------------------------------------------
+        print(
+            f"Prediction: {CLASS_NAMES[predicted_class]}"
+        )
 
-    cam_resized = cv2.resize(
-        cam,
-        (width, height)
-    )
+        print(
+            f"Confidence: {confidence * 100:.2f}%"
+        )
 
-    heatmap = np.uint8(
-        255 * cam_resized
-    )
+        # ----------------------------------------------------
+        # Generate Grad-CAM
+        # ----------------------------------------------------
 
-    heatmap = cv2.applyColorMap(
-        heatmap,
-        cv2.COLORMAP_JET
-    )
+        cam = gradcam.generate(
+            input_tensor,
+            predicted_class
+        )
 
-    # --------------------------------------------------------
-    # Overlay
-    # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Prepare images
+        # ----------------------------------------------------
 
-    overlay = cv2.addWeighted(
-        original_bgr,
-        0.6,
-        heatmap,
-        0.4,
-        0
-    )
+        original = np.array(
+            original_image
+        )
 
-    # Convert OpenCV BGR → RGB
-    heatmap_rgb = cv2.cvtColor(
-        heatmap,
-        cv2.COLOR_BGR2RGB
-    )
+        original = cv2.cvtColor(
+            original,
+            cv2.COLOR_RGB2BGR
+        )
 
-    overlay_rgb = cv2.cvtColor(
-        overlay,
-        cv2.COLOR_BGR2RGB
-    )
+        height, width = original.shape[:2]
 
-    # --------------------------------------------------------
-    # Return results
-    # --------------------------------------------------------
+        cam_resized = cv2.resize(
+            cam,
+            (width, height)
+        )
 
-    return (
-        prediction,
-        confidence,
-        original,
-        heatmap_rgb,
-        overlay_rgb
-    )
+        heatmap = np.uint8(
+            255 * cam_resized
+        )
+
+        heatmap = cv2.applyColorMap(
+            heatmap,
+            cv2.COLORMAP_JET
+        )
+
+        overlay = cv2.addWeighted(
+            original,
+            0.6,
+            heatmap,
+            0.4,
+            0
+        )
+
+        # ----------------------------------------------------
+        # Return results
+        # ----------------------------------------------------
+
+        return {
+            "prediction": CLASS_NAMES[predicted_class],
+            "confidence": confidence,
+            "original": cv2.cvtColor(
+                original,
+                cv2.COLOR_BGR2RGB
+            ),
+            "heatmap": cv2.cvtColor(
+                heatmap,
+                cv2.COLOR_BGR2RGB
+            ),
+            "overlay": cv2.cvtColor(
+                overlay,
+                cv2.COLOR_BGR2RGB
+            )
+        }
+
+    finally:
+
+        gradcam.remove_hooks()
